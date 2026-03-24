@@ -1,0 +1,8 @@
+venv311/
+__pycache__/
+*.pyc
+.env
+stock_data.csv
+All_Stocks_Data.csv
+Stocks_Data.csv
+stock_prediction.ipynb

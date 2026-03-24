@@ -1,0 +1,426 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Stock Forecast Studio</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link
+      href="{{ url_for('static', filename='styles.css') }}"
+      rel="stylesheet"
+    />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  </head>
+  <body>
+    <div class="shape one"></div>
+    <div class="shape two"></div>
+
+    <main class="dashboard">
+      <section class="card hero">
+        <p class="kicker">Forecast Lab</p>
+        <h1>Stock Forecast Studio</h1>
+        <p class="subtitle">
+          Compare Linear Regression and LSTM forecasts trained from
+          All_Stocks_Data.csv and inspect both trend lines together.
+        </p>
+        <p id="symbolBadge" class="symbol-badge">Dataset symbol: --</p>
+      </section>
+
+      <section class="card controls">
+        <div class="controls-row">
+          <div class="field">
+            <label for="daysInput">Forecast horizon (days)</label>
+            <input type="number" id="daysInput" min="1" max="365" value="7" />
+          </div>
+          <button id="predictBtn" type="button">Generate Forecast</button>
+        </div>
+        <p id="statusMessage" class="status idle">
+          Enter a number of days, then click Generate Forecast.
+        </p>
+      </section>
+
+      <section class="metrics">
+        <article class="card metric">
+          <p>Forecast Points</p>
+          <strong id="pointsMetric">--</strong>
+        </article>
+        <article class="card metric">
+          <p>LR Day 1</p>
+          <strong id="lrFirstMetric">--</strong>
+        </article>
+        <article class="card metric">
+          <p>LSTM Day 1</p>
+          <strong id="lstmFirstMetric">--</strong>
+        </article>
+        <article class="card metric">
+          <p>Last-Day Delta (LSTM-LR)</p>
+          <strong id="deltaMetric">--</strong>
+        </article>
+      </section>
+
+      <section class="card chart-wrap">
+        <div class="chart-head">
+          <h2 class="chart-title">Projected Price Curve</h2>
+          <p class="chart-note">
+            Manual refresh only - click the button any time you want new output.
+          </p>
+        </div>
+        <div class="canvas-shell">
+          <canvas id="stockChart"></canvas>
+        </div>
+      </section>
+
+      <section class="card predictions-wrap">
+        <div class="table-head">
+          <h2 class="chart-title">Prediction Values</h2>
+          <p class="chart-note">Day-wise output for both trained models.</p>
+        </div>
+        <div class="table-shell">
+          <table class="prediction-table" aria-label="Model predictions">
+            <thead>
+              <tr>
+                <th scope="col">Day</th>
+                <th scope="col">Linear Regression</th>
+                <th scope="col">LSTM</th>
+              </tr>
+            </thead>
+            <tbody id="predictionsBody">
+              <tr>
+                <td colspan="3" class="placeholder-row">No prediction yet.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <script>
+      let stockChart;
+
+      const daysInput = document.getElementById("daysInput");
+      const predictBtn = document.getElementById("predictBtn");
+      const statusMessage = document.getElementById("statusMessage");
+      const symbolBadge = document.getElementById("symbolBadge");
+      const pointsMetric = document.getElementById("pointsMetric");
+      const lrFirstMetric = document.getElementById("lrFirstMetric");
+      const lstmFirstMetric = document.getElementById("lstmFirstMetric");
+      const deltaMetric = document.getElementById("deltaMetric");
+      const predictionsBody = document.getElementById("predictionsBody");
+
+      function setStatus(message, type = "idle") {
+        statusMessage.textContent = message;
+        statusMessage.className = `status ${type}`;
+      }
+
+      function formatCurrency(value) {
+        if (!Number.isFinite(value)) {
+          return "--";
+        }
+
+        return new Intl.NumberFormat("en-US", {
+          style: "currency",
+          currency: "USD",
+          maximumFractionDigits: 2,
+        }).format(value);
+      }
+
+      function formatSignedCurrency(value) {
+        if (!Number.isFinite(value)) {
+          return "--";
+        }
+
+        const absolute = formatCurrency(Math.abs(value));
+        if (absolute === "--" || value === 0) {
+          return absolute;
+        }
+
+        return `${value > 0 ? "+" : "-"}${absolute}`;
+      }
+
+      function resetMetrics() {
+        pointsMetric.textContent = "--";
+        lrFirstMetric.textContent = "--";
+        lstmFirstMetric.textContent = "--";
+        deltaMetric.textContent = "--";
+      }
+
+      function resetPredictionTable() {
+        predictionsBody.innerHTML = `
+          <tr>
+            <td colspan="3" class="placeholder-row">No prediction yet.</td>
+          </tr>
+        `;
+      }
+
+      function updateMetrics(lrPredictions, lstmPredictions) {
+        const pointCount = Math.min(
+          lrPredictions.length,
+          lstmPredictions.length,
+        );
+
+        if (pointCount === 0) {
+          resetMetrics();
+          return;
+        }
+
+        const lrFirstValue = lrPredictions[0];
+        const lstmFirstValue = lstmPredictions[0];
+        const lastDayDelta =
+          lstmPredictions[pointCount - 1] - lrPredictions[pointCount - 1];
+
+        pointsMetric.textContent = String(pointCount);
+        lrFirstMetric.textContent = formatCurrency(lrFirstValue);
+        lstmFirstMetric.textContent = formatCurrency(lstmFirstValue);
+        deltaMetric.textContent = formatSignedCurrency(lastDayDelta);
+      }
+
+      function updatePredictionTable(lrPredictions, lstmPredictions) {
+        const pointCount = Math.min(
+          lrPredictions.length,
+          lstmPredictions.length,
+        );
+
+        if (pointCount === 0) {
+          resetPredictionTable();
+          return;
+        }
+
+        predictionsBody.innerHTML = lrPredictions
+          .slice(0, pointCount)
+          .map((lrValue, index) => {
+            const lstmValue = lstmPredictions[index];
+            return `
+              <tr>
+                <td>Day ${index + 1}</td>
+                <td>${formatCurrency(lrValue)}</td>
+                <td>${formatCurrency(lstmValue)}</td>
+              </tr>
+            `;
+          })
+          .join("");
+      }
+
+      function renderChart(lrPredictions, lstmPredictions) {
+        const pointCount = Math.min(
+          lrPredictions.length,
+          lstmPredictions.length,
+        );
+        const labels = Array.from(
+          { length: pointCount },
+          (_, idx) => `Day ${idx + 1}`,
+        );
+        const canvas = document.getElementById("stockChart");
+        const ctx = canvas.getContext("2d");
+        const lrGradient = ctx.createLinearGradient(0, 0, 0, 320);
+        lrGradient.addColorStop(0, "rgba(10, 138, 112, 0.34)");
+        lrGradient.addColorStop(1, "rgba(10, 138, 112, 0.04)");
+
+        const lstmGradient = ctx.createLinearGradient(0, 0, 0, 320);
+        lstmGradient.addColorStop(0, "rgba(235, 111, 53, 0.23)");
+        lstmGradient.addColorStop(1, "rgba(235, 111, 53, 0.02)");
+
+        if (stockChart) {
+          stockChart.destroy();
+        }
+
+        stockChart = new Chart(canvas, {
+          type: "line",
+          data: {
+            labels,
+            datasets: [
+              {
+                label: "Linear Regression",
+                data: lrPredictions.slice(0, pointCount),
+                borderColor: "#0a8a70",
+                borderWidth: 3,
+                pointBackgroundColor: "#eb6f35",
+                pointBorderColor: "#ffffff",
+                pointBorderWidth: 1.5,
+                pointRadius: 2,
+                pointHoverRadius: 5,
+                fill: true,
+                backgroundColor: lrGradient,
+                tension: 0.25,
+              },
+              {
+                label: "LSTM",
+                data: lstmPredictions.slice(0, pointCount),
+                borderColor: "#eb6f35",
+                borderWidth: 3,
+                borderDash: [6, 4],
+                pointBackgroundColor: "#0a8a70",
+                pointBorderColor: "#ffffff",
+                pointBorderWidth: 1.5,
+                pointRadius: 2,
+                pointHoverRadius: 5,
+                fill: true,
+                backgroundColor: lstmGradient,
+                tension: 0.25,
+              },
+            ],
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: {
+              mode: "index",
+              intersect: false,
+            },
+            plugins: {
+              legend: {
+                labels: {
+                  usePointStyle: true,
+                  pointStyle: "circle",
+                  boxWidth: 8,
+                  color: "#12212e",
+                  font: {
+                    family: "Manrope",
+                    weight: "600",
+                  },
+                },
+              },
+              tooltip: {
+                backgroundColor: "#12212e",
+                titleFont: {
+                  family: "Manrope",
+                  weight: "700",
+                },
+                bodyFont: {
+                  family: "Manrope",
+                },
+                callbacks: {
+                  label(context) {
+                    return `${context.dataset.label}: ${formatCurrency(context.parsed.y)}`;
+                  },
+                },
+              },
+            },
+            scales: {
+              x: {
+                grid: {
+                  display: false,
+                },
+                ticks: {
+                  color: "#425468",
+                  font: {
+                    family: "Manrope",
+                  },
+                },
+              },
+              y: {
+                grid: {
+                  color: "rgba(18, 33, 46, 0.09)",
+                },
+                ticks: {
+                  color: "#425468",
+                  font: {
+                    family: "Manrope",
+                  },
+                  callback(value) {
+                    return formatCurrency(Number(value));
+                  },
+                },
+              },
+            },
+          },
+        });
+      }
+
+      async function predictStock() {
+        const days = Number(daysInput.value);
+
+        if (!Number.isInteger(days) || days < 1 || days > 365) {
+          setStatus("Please enter a whole number between 1 and 365.", "error");
+          daysInput.focus();
+          return;
+        }
+
+        predictBtn.disabled = true;
+        setStatus("Running forecast model...", "loading");
+
+        try {
+          const response = await fetch("/predict", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ days }),
+          });
+
+          const payload = await response.json().catch(() => ({}));
+
+          if (!response.ok) {
+            throw new Error(
+              payload.error || `Request failed with status ${response.status}`,
+            );
+          }
+
+          const lrPredictions = payload.linear_regression;
+          const lstmPredictions = payload.lstm;
+          if (
+            !Array.isArray(lrPredictions) ||
+            !Array.isArray(lstmPredictions)
+          ) {
+            throw new Error("Model outputs are missing in the response.");
+          }
+
+          const pointCount = Math.min(
+            lrPredictions.length,
+            lstmPredictions.length,
+          );
+          if (pointCount === 0) {
+            throw new Error("No prediction data was returned.");
+          }
+
+          const lrSeries = lrPredictions
+            .slice(0, pointCount)
+            .map((value) => Number(value));
+          const lstmSeries = lstmPredictions
+            .slice(0, pointCount)
+            .map((value) => Number(value));
+
+          if (
+            lrSeries.some((value) => !Number.isFinite(value)) ||
+            lstmSeries.some((value) => !Number.isFinite(value))
+          ) {
+            throw new Error("One or more prediction values were invalid.");
+          }
+
+          renderChart(lrSeries, lstmSeries);
+          updateMetrics(lrSeries, lstmSeries);
+          updatePredictionTable(lrSeries, lstmSeries);
+
+          if (payload.symbol) {
+            symbolBadge.textContent = `Dataset symbol: ${payload.symbol}`;
+          }
+
+          setStatus(
+            `Forecast generated for ${pointCount} day${pointCount === 1 ? "" : "s"} (Linear Regression + LSTM).`,
+            "success",
+          );
+        } catch (error) {
+          if (stockChart) {
+            stockChart.destroy();
+            stockChart = undefined;
+          }
+          resetMetrics();
+          resetPredictionTable();
+          setStatus(`Unable to fetch predictions: ${error.message}`, "error");
+        } finally {
+          predictBtn.disabled = false;
+        }
+      }
+
+      resetPredictionTable();
+      predictBtn.addEventListener("click", predictStock);
+      daysInput.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          predictStock();
+        }
+      });
+    </script>
+  </body>
+</html>
